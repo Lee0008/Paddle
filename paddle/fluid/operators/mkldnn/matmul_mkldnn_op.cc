@@ -14,12 +14,13 @@ limitations under the License. */
 
 #include "paddle/fluid/operators/mkldnn/matmul_mkldnn_op.h"
 #include <tuple>
+#include "paddle/fluid/framework/convert_utils.h"
 
 using dnnl::memory;
 using dnnl::primitive;
 using paddle::framework::DataLayout;
 using paddle::framework::ExecutionContext;
-using paddle::framework::vectorize;
+using phi::vectorize;
 using paddle::platform::GetMKLDNNFormat;
 using paddle::platform::MKLDNNFormatForSize;
 using paddle::platform::MKLDNNDeviceContext;
@@ -56,10 +57,11 @@ static Tensor FoldFirstAndLastDims(const MKLDNNDeviceContext& dev_ctx,
 
   auto output_dims = vectorize(output.dims());
 
-  memory::data_type input_type =
-      paddle::framework::ToMKLDNNDataType(input->type());
+  memory::data_type input_type = paddle::framework::ToMKLDNNDataType(
+      paddle::framework::TransToProtoVarType(input->dtype()));
   paddle::platform::ReorderMKLDNNHandler reorder_handler(
-      output_dims, input->type(), input_type, dev_ctx.GetEngine());
+      output_dims, paddle::framework::TransToProtoVarType(input->dtype()),
+      input_type, dev_ctx.GetEngine());
 
   auto reorder_src_memory_p = reorder_handler.AcquireSrcMemory(
       memory::format_tag::abc,
@@ -68,9 +70,6 @@ static Tensor FoldFirstAndLastDims(const MKLDNNDeviceContext& dev_ctx,
       &output, memory::format_tag::bac, dev_ctx.GetPlace());
   auto reorder_p = reorder_handler.AcquireReorder(reorder_src_memory_p,
                                                   reorder_dst_memory_p);
-
-  paddle::platform::RecordEvent record_reorder(
-      "int_reorder", paddle::platform::EventRole::kUniqueOp);
 
   auto& astream = MKLDNNDeviceContext::tls().get_stream();
   reorder_p->execute(astream, *reorder_src_memory_p, *reorder_dst_memory_p);
@@ -94,14 +93,14 @@ constexpr bool IsBfloat16() {
 // original x_dim is returned.
 static paddle::framework::DDim RowMatrixDimsFromVector(
     const paddle::framework::DDim& x_dim) {
-  return x_dim.size() > 1 ? x_dim : paddle::framework::make_ddim({1, x_dim[0]});
+  return x_dim.size() > 1 ? x_dim : phi::make_ddim({1, x_dim[0]});
 }
 
 // Get column matrix shape from a vector shape. If the ran of y_dim > 1, the
 // original y_dim is returned.
 static paddle::framework::DDim ColumnMatrixDimsFromVector(
     const paddle::framework::DDim& y_dim) {
-  return y_dim.size() > 1 ? y_dim : paddle::framework::make_ddim({y_dim[0], 1});
+  return y_dim.size() > 1 ? y_dim : phi::make_ddim({y_dim[0], 1});
 }
 
 template <typename XT, typename YT, typename OT>
@@ -114,10 +113,8 @@ class MatMulMKLDNNHandler
                       float scale)
       : paddle::platform::MKLDNNHandlerNoCachingT<XT, dnnl::matmul>(engine,
                                                                     cpu_place) {
-    auto mat_dim_x =
-        paddle::operators::math::CreateMatrixDescriptor(x->dims(), 0, trans_x);
-    auto mat_dim_y =
-        paddle::operators::math::CreateMatrixDescriptor(y->dims(), 0, trans_y);
+    auto mat_dim_x = phi::funcs::CreateMatrixDescriptor(x->dims(), 0, trans_x);
+    auto mat_dim_y = phi::funcs::CreateMatrixDescriptor(y->dims(), 0, trans_y);
 
     memory::dim x_bs = mat_dim_x.batch_size_;
     memory::dim y_bs = mat_dim_y.batch_size_;
@@ -151,8 +148,7 @@ class MatMulMKLDNNHandler
   MatMulMKLDNNHandler(const dnnl::engine engine, const ExecutionContext& ctx,
                       float scale)
       : paddle::platform::MKLDNNHandlerNoCachingT<XT, dnnl::matmul>(
-            engine, ctx.GetPlace()),
-        matmul_dims_(GetMatmulDims(ctx)) {
+            engine, ctx.GetPlace()) {
     dnnl::primitive_attr attr;
     float scale_out = ComputeOutputScale(ctx);
     if (scale_out != 1.0f) {
@@ -160,6 +156,7 @@ class MatMulMKLDNNHandler
       attr.set_output_scales(tensor_wide_scale, {scale_out});
     }
 
+    auto matmul_dims_ = GetMatmulDims(ctx);
     auto x_md = memory::desc(matmul_dims_.x_dims, MKLDNNGetDataType<XT>(),
                              matmul_dims_.x_strides);
     auto y_md = memory::desc(matmul_dims_.y_dims, MKLDNNGetDataType<YT>(),
@@ -238,8 +235,8 @@ class MatMulMKLDNNHandler
         out_strides;
   };
 
-  std::pair<paddle::operators::math::MatDescriptor, memory::dims>
-  GetInputDimsAndStrides(const ExecutionContext& ctx, std::string input_name) {
+  std::pair<phi::funcs::MatDescriptor, memory::dims> GetInputDimsAndStrides(
+      const ExecutionContext& ctx, std::string input_name) {
     auto shape = ctx.Attr<std::vector<int>>("fused_reshape_" + input_name);
     auto axis = ctx.Attr<std::vector<int>>("fused_transpose_" + input_name);
     auto input_dims = ctx.Input<Tensor>(input_name)->dims();
@@ -280,10 +277,9 @@ class MatMulMKLDNNHandler
 
     auto& MatrixDimsFromVector = input_name == "X" ? RowMatrixDimsFromVector
                                                    : ColumnMatrixDimsFromVector;
-    paddle::operators::math::MatDescriptor mat_dim =
-        paddle::operators::math::CreateMatrixDescriptor(
-            MatrixDimsFromVector(new_dims), 0,
-            ctx.Attr<bool>("transpose_" + input_name));
+    phi::funcs::MatDescriptor mat_dim = phi::funcs::CreateMatrixDescriptor(
+        MatrixDimsFromVector(new_dims), 0,
+        ctx.Attr<bool>("transpose_" + input_name));
 
     memory::dims strides;
     if (!shape.empty()) {
@@ -325,10 +321,10 @@ class MatMulMKLDNNHandler
   }
 
   MatMulDims GetMatmulDims(const ExecutionContext& ctx) {
-    paddle::operators::math::MatDescriptor mat_dim_x;
+    phi::funcs::MatDescriptor mat_dim_x;
     memory::dims strides_x;
     std::tie(mat_dim_x, strides_x) = GetInputDimsAndStrides(ctx, "X");
-    paddle::operators::math::MatDescriptor mat_dim_y;
+    phi::funcs::MatDescriptor mat_dim_y;
     memory::dims strides_y;
     std::tie(mat_dim_y, strides_y) = GetInputDimsAndStrides(ctx, "Y");
 
@@ -419,7 +415,6 @@ class MatMulMKLDNNHandler
   }
 
  private:
-  MatMulDims matmul_dims_;
   uint32_t x_offset_;
   uint32_t y_offset_;
   uint32_t out_offset_;
@@ -433,7 +428,7 @@ class MatMulMKLDNNHandler
  * If transposed, `H,W` will be swapped.
  */
 static void ReshapeTensorToMatrixSequence(
-    Tensor* x, const paddle::operators::math::MatDescriptor& descriptor) {
+    Tensor* x, const phi::funcs::MatDescriptor& descriptor) {
   int64_t h, w;
   h = descriptor.height_;
   w = descriptor.width_;
@@ -465,10 +460,8 @@ static void ReshapeXYOutToMatrixSequence(Tensor* x, Tensor* y, Tensor* out,
                                          bool trans_x, bool trans_y) {
   auto x_dim = RowMatrixDimsFromVector(x->dims());
   auto y_dim = ColumnMatrixDimsFromVector(y->dims());
-  auto mat_dim_x =
-      paddle::operators::math::CreateMatrixDescriptor(x_dim, 0, trans_x);
-  auto mat_dim_y =
-      paddle::operators::math::CreateMatrixDescriptor(y_dim, 0, trans_y);
+  auto mat_dim_x = phi::funcs::CreateMatrixDescriptor(x_dim, 0, trans_x);
+  auto mat_dim_y = phi::funcs::CreateMatrixDescriptor(y_dim, 0, trans_y);
   if (mat_dim_x.batch_size_ == 0 && mat_dim_y.batch_size_ == 0) {
     out->Resize({mat_dim_x.height_, mat_dim_y.width_});
   } else {

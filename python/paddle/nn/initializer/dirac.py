@@ -15,26 +15,31 @@
 from ...fluid.initializer import Initializer
 from ...fluid.data_feeder import check_variable_and_dtype
 from ...fluid.core import VarDesc
-from ...fluid import unique_name, framework
+from ...fluid import framework
+from paddle import in_dynamic_mode
+from paddle.utils import unique_name
 
 __all__ = []
 
 
 class Dirac(Initializer):
-    """Initialize the 3D/4D/5D Tensor with Dirac delta function.
+    r"""Initialize the 3D/4D/5D Tensor with Dirac delta function.
     
     It can reserve the feature of convolution layer input, which means that
     as many channels are reserved as possible.
 
     In this initialize method, elements in the middle of convolution kernels will
-    be set to 1 . The formula can be described as:
+    be set to 1 . The formula can be described as follow.
 
-    $ Assuming:  N=min(in\_channels, out\_channels)$
+    .. math::
 
-    $ X[d, d, shape[2]//2, shape[3]//2, ...]=1,  \   d=0,1...N$
+        X[d, d, shape[2]//2, shape[3]//2, ...]=1,  \   d=0,1...N
+    
+    where, ``N`` is the minimum value of ``in_channels`` and ``out_channels``
 
     Args:
-        groups(int): 0-dimension of the Tensor will be divided by groups, each group has the same value.
+        groups(int, optional): 0-dimension of the Tensor will be divided by groups, 
+            each group has the same value. Default: 1.
         name(str, optional): The default value is None. Normally there is no need for user to set this
             property. For more information, please refer to :ref:`api_guide_Name`.
 
@@ -46,7 +51,7 @@ class Dirac(Initializer):
 
             import paddle
             
-            #1.For kernel_size is uneven number:
+            #1. For kernel_size is uneven number:
             
             attr = paddle.ParamAttr(initializer=paddle.nn.initializer.Dirac())
             conv = paddle.nn.Conv1D(3, 2, 3, weight_attr=attr)
@@ -218,6 +223,6 @@ class Dirac(Initializer):
                        "out_dtype": var.dtype},
                 stop_gradient=True)
 
-        if not framework.in_dygraph_mode():
+        if not in_dynamic_mode():
             var.op = op
         return op

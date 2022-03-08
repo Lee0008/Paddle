@@ -16,12 +16,17 @@
 Functions for Auto SParsity (ASP) training and inference.
 """
 
+import os
 import copy
 import numpy as np
 import paddle
 from paddle.fluid import global_scope, program_guard, layers
 from paddle.fluid.initializer import ConstantInitializer
 from paddle.fluid.contrib import sparsity
+from paddle.fluid import core
+
+OpRole = core.op_proto_and_checker_maker.OpRole
+OP_ROLE_KEY = core.op_proto_and_checker_maker.kOpRoleAttrName()
 
 __all__ = [
     'decorate', 'prune_model', 'set_excluded_layers', 'reset_excluded_layers'
@@ -214,8 +219,15 @@ def prune_model(main_program=None,
             # Must call `exe.run(startup_program)` first before calling `sparsity.prune_model`
             sparsity.prune_model(main_program, mask_algo='mask_2d_best')
     """
-    device = paddle.device.get_device()
-    place = paddle.set_device(device)
+    if main_program is not None and hasattr(
+            main_program,
+            "distributed_info_") and main_program.distributed_info_[
+                "sharding_degree"] > 1 and paddle.fluid.is_compiled_with_cuda():
+        gpu_id = int(os.environ.get('FLAGS_selected_gpus', 0))
+        place = paddle.CUDAPlace(gpu_id)
+    else:
+        device = paddle.device.get_device()
+        place = paddle.set_device(device)
 
     MaskAlgo_mapping = {
         'mask_1d': sparsity.MaskAlgo.MASK_1D,
@@ -528,8 +540,11 @@ class ASPHelper(object):
                         'Y': asp_info.mask_vars[param_grad[0].name]
                     },
                     outputs={'Out': param_grad[0]},
-                    attrs={'axis': -1,
-                           'use_mkldnn': False})
+                    attrs={
+                        'axis': -1,
+                        'use_mkldnn': False,
+                        OP_ROLE_KEY: OpRole.Optimize
+                    })
 
 
 class OptimizerWithSparsityGuarantee(object):

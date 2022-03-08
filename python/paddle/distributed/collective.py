@@ -29,7 +29,6 @@ from ..fluid.layers import utils
 from ..fluid.dygraph import layers
 from ..fluid.dygraph.parallel import prepare_context
 import paddle
-from .fleet import fleet
 import paddle.fluid as fluid
 import paddle.fluid.core as core
 from paddle import _C_ops
@@ -127,8 +126,8 @@ def _get_group_map():
     global _group_map
     if not _group_map:
         genv = _get_global_env()
-        _group_map[0] = Group(genv.rank, genv.world_size,
-                              list(range(genv.world_size)))
+        _group_map[0] = Group(
+            genv.rank, genv.world_size, ranks=list(range(genv.world_size)))
     return _group_map
 
 
@@ -267,6 +266,10 @@ def new_group(ranks=None, backend=None):
             elif core.is_compiled_with_npu():
                 place = core.NPUPlace(genv.device_id)
                 core.HCCLParallelContext(strategy,
+                                         place).init_with_ring_id(ring_id)
+            elif core.is_compiled_with_mlu():
+                place = core.MLUPlace(genv.device_id)
+                core.CNCLParallelContext(strategy,
                                          place).init_with_ring_id(ring_id)
             else:
                 assert False, ("no cuda device found")
@@ -1219,6 +1222,7 @@ def _parallel_linear(x,
             inputs={'X': linear_out},
             outputs={'Out': out},
             attrs={
+                'rank': inner_rank,
                 'ring_id': ring_id,
                 'nranks': nranks,
                 'use_calc_stream': True,
@@ -1421,6 +1425,7 @@ def split(x,
             "graph mode, plese use ParallelEmbedding, ParallelRowLinear, "
             "ParallelColumnLinear instead.")
     else:
+        from .fleet import fleet
         assert fleet._role_maker, ("To use paddle.distributed.split, "
                                    "you must call fleet.init() firstly.")
         rank = fleet.worker_index()

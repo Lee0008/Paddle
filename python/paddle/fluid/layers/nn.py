@@ -26,7 +26,7 @@ import six
 import paddle
 from ..layer_helper import LayerHelper
 from ..initializer import Normal, Constant, NumpyArrayInitializer
-from ..framework import Variable, OpProtoHolder, in_dygraph_mode, dygraph_only, _dygraph_tracer, default_main_program, _varbase_creator, static_only, _global_flags
+from ..framework import Variable, OpProtoHolder, in_dygraph_mode, dygraph_only, _dygraph_tracer, default_main_program, _varbase_creator, static_only, _global_flags, _in_eager_mode
 from .. import dygraph_utils
 from ..param_attr import ParamAttr
 from .layer_function_generator import autodoc, templatedoc, _generate_doc_string_
@@ -660,6 +660,69 @@ def _pull_sparse_v2(input,
                 'W': w},
         outputs={'Out': outs},
         attrs=attrs)
+    if len(outs) == 1:
+        return outs[0]
+    return outs
+
+
+def _pull_gpups_sparse(input,
+                       size,
+                       dtype='float32',
+                       is_distributed=False,
+                       is_sparse=False):
+    r"""
+    **Pull GpuPS Sparse Layer**
+
+    This layer is used to lookup embeddings of IDs, provided by :attr:`input`, in
+    GpuPS lookup table. The result of this lookup is the embedding of each ID in the
+    :attr:`input`.
+
+    Args:
+        input(Variable|list of Variable): Input is a Tensor<int64> Variable, which
+            contains the IDs information.
+        size(int|list of int): The embedding size parameter of each input, which indicates the size of
+            each embedding vector respectively.
+        dtype(str): The dtype refers to the data type of output tensor. Only supports
+	    float32 now.
+
+    Returns:
+        Variable|list of Variable: The tensor variable storing the embeddings of the \
+                  supplied inputs, whose size are indicated by size respectively.
+
+    Examples:
+        .. code-block:: python
+
+          import paddle.fluid as fluid
+          slots = []
+          data_1 = fluid.layers.data(name='sequence', shape=[1], dtype='int64', lod_level=1)
+          slots.append(data_1)
+          data_2 = fluid.layers.data(name='sequence', shape=[1], dtype='int64', lod_level=1)
+          slots.append(data_2)
+          embs = fluid.layers.pull_gpups_sparse(input=slots, size=[11, 35])
+    """
+    helper = LayerHelper('pull_gpups_sparse', **locals())
+    if dtype != 'float32':
+        raise ValueError(
+            "GpuPS only support float type embedding now, and your type is: " +
+            dtype)
+    helper.input_dtype()
+    inputs = helper.multiple_input()
+    outs = [
+        helper.create_variable_for_type_inference(dtype)
+        for i in range(len(inputs))
+    ]
+    w = helper.create_parameter(
+        attr=helper.param_attr, shape=[11], dtype=dtype, is_bias=False)
+    helper.append_op(
+        type='pull_gpups_sparse',
+        inputs={'Ids': inputs,
+                'W': w},
+        outputs={'Out': outs},
+        attrs={
+            'size': size,
+            'is_distributed': is_distributed,
+            'is_sparse': is_sparse
+        })
     if len(outs) == 1:
         return outs[0]
     return outs
@@ -6191,6 +6254,10 @@ def reshape(x, shape, actual_shape=None, act=None, inplace=False, name=None):
             # the shape of reshaped_3 is [6,8].
     """
     if in_dygraph_mode():
+        if _in_eager_mode():
+            tmp_tensor_type = core.eager.Tensor
+        else:
+            tmp_tensor_type = Variable
         #TODO(zhiqiu): enable inplace in dygraph mode.
         if inplace:
             warnings.warn(
@@ -6202,7 +6269,7 @@ def reshape(x, shape, actual_shape=None, act=None, inplace=False, name=None):
                 for item in shape
             ]
             out, _ = _C_ops.reshape2(x, None, 'shape', shape)
-        elif isinstance(shape, Variable):
+        elif isinstance(shape, tmp_tensor_type):
             shape.stop_gradient = True
             out, _ = _C_ops.reshape2(x, shape)
         else:
@@ -6213,7 +6280,8 @@ def reshape(x, shape, actual_shape=None, act=None, inplace=False, name=None):
         return dygraph_utils._append_activation_in_dygraph(out, act)
 
     check_variable_and_dtype(x, 'x', [
-        'float16', 'float32', 'float64', 'int32', 'int64', 'bool', 'uint16'
+        'float16', 'float32', 'float64', 'int16', 'int32', 'int64', 'bool',
+        'uint16'
     ], 'reshape')
     check_type(shape, 'shape', (list, tuple, Variable), 'reshape')
     check_type(actual_shape, 'actual_shape', (Variable, type(None)), 'reshape')
@@ -6393,10 +6461,10 @@ def unsqueeze(input, axes, name=None):
         return out
 
     check_type(axes, 'axis/axes', (int, list, tuple, Variable), 'unsqueeze')
-    check_variable_and_dtype(
-        input, 'input',
-        ['float16', 'float32', 'float64', 'bool', 'int8', 'int32', 'int64'],
-        'unsqueeze')
+    check_variable_and_dtype(input, 'input', [
+        'float16', 'float32', 'float64', 'bool', 'int8', 'int16', 'int32',
+        'int64'
+    ], 'unsqueeze')
     helper = LayerHelper("unsqueeze2", **locals())
     inputs = {"X": input}
     attrs = {}
@@ -8476,9 +8544,9 @@ def gather_nd(input, index, name=None):
     """
     if in_dygraph_mode():
         return _C_ops.gather_nd(input, index)
-    check_variable_and_dtype(input, 'input',
-                             ['bool', 'float32', 'float64', 'int32', 'int64'],
-                             'gather_np')
+    check_variable_and_dtype(
+        input, 'input',
+        ['bool', 'float32', 'float64', 'int16', 'int32', 'int64'], 'gather_np')
     check_variable_and_dtype(index, 'index', ['int32', 'int64'], 'gather_np')
     helper = LayerHelper('gather_nd', **locals())
     dtype = helper.input_dtype()
@@ -9864,7 +9932,7 @@ def prelu(x, mode, param_attr=None, data_format="NCHW", name=None):
         #NOTE(zhiqiu): Revert shape to [1, channel, 1, 1] for compatibility with saved model of old version.
         #NOTE(GuoxiaWang): support NHWC data format
         if data_format == 'NHWC':
-            alpha_shape = [1, 1, 1, x.shape[1]]
+            alpha_shape = [1, 1, 1, x.shape[-1]]
         else:
             alpha_shape = [1, x.shape[1], 1, 1]
 
@@ -10080,6 +10148,9 @@ def flatten(x, axis=1, name=None):
     check_variable_and_dtype(
         x, 'x', ['float32', 'float64', 'int8', 'int32', 'int64', 'uint8'],
         'flatten')
+    if in_dygraph_mode():
+        return _C_ops.flatten2(x, 'axis', axis)[0]
+
     helper = LayerHelper('flatten', **locals())
 
     if not (isinstance(x, Variable)):
@@ -11068,24 +11139,30 @@ def slice(input, axes, starts, ends):
 
         infer_flags = list(1 for i in range(len(axes)))
 
+        if _in_eager_mode():
+            tmp_tensor_type = core.eager.Tensor
+        else:
+            tmp_tensor_type = Variable
+
         if isinstance(starts, (list, tuple)):
             starts = [
-                item.numpy().item(0) if isinstance(item, Variable) else item
+                item.numpy().item(0)
+                if isinstance(item, tmp_tensor_type) else item
                 for item in starts
             ]
             attrs += ('starts', starts)
-        elif isinstance(starts, Variable):
+        elif isinstance(starts, tmp_tensor_type):
             starts_tensor = starts
             starts.stop_gradient = True
             infer_flags = list(-1 for i in range(len(axes)))
 
         if isinstance(ends, (list, tuple)):
             ends = [
-                item.numpy().item(0) if isinstance(item, Variable) else item
-                for item in ends
+                item.numpy().item(0)
+                if isinstance(item, tmp_tensor_type) else item for item in ends
             ]
             attrs += ('ends', ends)
-        elif isinstance(ends, Variable):
+        elif isinstance(ends, tmp_tensor_type):
             ends_tensor = ends
             ends_tensor.stop_gradient = True
             infer_flags = list(-1 for i in range(len(axes)))
@@ -15128,6 +15205,9 @@ def mish(x, threshold=20, name=None):
         out, = exe.run(feed={'x':x_data}, fetch_list=[y.name])
         print(out)  # [[0.66666667, 1.66666667, 3., 4.]]
     """
+    if in_dygraph_mode():
+        return _C_ops.mish(x, 'threshold', threshold)
+
     check_variable_and_dtype(x, 'x', ['float32', 'float64'], 'mish')
     check_type(threshold, 'threshold', (float, int), 'mish')
     assert threshold > 0, "threshold of mish should be greater than 0, " \
@@ -15139,7 +15219,7 @@ def mish(x, threshold=20, name=None):
         type='mish',
         inputs={'X': x},
         outputs={'Out': out},
-        attrs={'threshold': threshold or -1})
+        attrs={'threshold': threshold})
     return out
 
 

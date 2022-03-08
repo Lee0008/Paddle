@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "paddle/fluid/operators/reduce_ops/cub_reduce.h"
+#include "paddle/fluid/operators/reduce_ops/reduce_op.cu.h"
 #include "paddle/fluid/operators/reduce_ops/reduce_sum_op.h"
 
 template <typename T>
 using CUDAReduceSumGradKernel =
-    ops::ReduceGradKernel<paddle::platform::CUDADeviceContext, T,
-                          ops::SumGradFunctor, true>;
+    ops::ReduceCudaGradKernel<T, kps::IdentityFunctor>;
 
 REGISTER_OP_CUDA_KERNEL(
     reduce_sum_grad, CUDAReduceSumGradKernel<bool>,
     CUDAReduceSumGradKernel<float>, CUDAReduceSumGradKernel<double>,
     CUDAReduceSumGradKernel<paddle::platform::float16>,
+    CUDAReduceSumGradKernel<paddle::platform::bfloat16>,
     CUDAReduceSumGradKernel<int>, CUDAReduceSumGradKernel<int64_t>,
     CUDAReduceSumGradKernel<paddle::platform::complex<float>>,
     CUDAReduceSumGradKernel<paddle::platform::complex<double>>);
